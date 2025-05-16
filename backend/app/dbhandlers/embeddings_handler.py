@@ -50,6 +50,18 @@ class EmbeddingsHandler:
                         wal_segments_ahead=1
                     )
                 )
+
+                self.client.create_payload_index(
+                    collection_name=QDRANT_COLLECTION_NAME,
+                    field_name="text",
+                    field_schema=models.TextIndexParams(
+                        type="text",
+                        tokenizer="word",
+                        min_token_len=2,
+                        max_token_len=20,
+                        lowercase=True
+                    )
+                )
         except Exception as e:
             print(f"Error ensuring collection exists: {str(e)}")
             raise

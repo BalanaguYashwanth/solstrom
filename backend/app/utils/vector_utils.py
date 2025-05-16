@@ -20,12 +20,16 @@ def prepare_point(embedding: DocumentEmbedding) -> models.PointStruct:
             "content_type": metadata.get("content_type"),
             "document_id": metadata.get("document_id"),
             "chunk_number": metadata.get("chunk_number"),
-            "total_chunks": metadata.get("total_chunks")
+            "total_chunks": metadata.get("total_chunks"),
+            "text": metadata.get("text", ""),
+            "text_length": metadata.get("text_length", 0)
         }
         
-        # Truncate text if present
-        if "text" in metadata:
-            optimized_metadata["text"] = metadata["text"][:2000]  # Store only beginning
+        # Add boundary information if available
+        if "is_sentence_boundary" in metadata:
+            optimized_metadata["is_sentence_boundary"] = metadata["is_sentence_boundary"]
+        if "is_paragraph_boundary" in metadata:
+            optimized_metadata["is_paragraph_boundary"] = metadata["is_paragraph_boundary"]
             
         return models.PointStruct(
             id=embedding.id,

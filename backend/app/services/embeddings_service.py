@@ -37,13 +37,8 @@ class EmbeddingService:
             vector=vector,
             top_k=limit,
             includes_values=includes_values,
-            filter_condition=filter_condition
+            filter_condition=filter_condition,
+            score_threshold=threshold
         )
-        
-        if threshold is not None:
-            raw_results = [
-                result for result in raw_results
-                if result.get("score", 0.0) >= threshold
-            ]
 
         return raw_results

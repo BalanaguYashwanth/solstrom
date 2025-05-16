@@ -22,9 +22,9 @@ class ProjectAgent:
             query_response = await EmbeddingService.get_embeddings(
                 vector=user_message_embeddings,
                 limit=self.prompt_config['rag_settings'].get('search_depth', 5),
-                threshold=self.prompt_config['rag_settings'].get('relevance_threshold', 0.75)
+                threshold=self.prompt_config['rag_settings'].get('relevance_threshold', 0.6)
             )
-            
+
             expanded_contexts = []
             available_sources = set()
 
@@ -44,7 +44,7 @@ class ProjectAgent:
                 doc_chunks = await EmbeddingService.get_embeddings(
                     vector=user_message_embeddings,
                     limit=20, 
-                    threshold=0.5,  
+                    threshold=0.5, 
                     filter_condition=models.Filter(
                         must=[
                             models.FieldCondition(

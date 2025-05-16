@@ -66,6 +66,7 @@ async def process_text_file(text: str, filename: str) -> List[Dict]:
             "source": filename,
             "content_type": "text/plain",
             "text": chunk['text'],
+            "original_length": len(chunk['text']), 
             "chunk_number": chunk['index'],
             "total_chunks": len(chunks),
             "start_pos": chunk['start_pos'],
@@ -106,16 +107,16 @@ def create_document_embedding(
         content_hash = hashlib.sha256(text_to_hash.encode()).hexdigest()
         int_id = int(content_hash[:15], 16) 
 
-        embedding_text = document['text'][:4000]  
+        embedding_text = document['text'] 
         embedding_values = EmbeddingService.create_embeddings(embedding_text)
         
         metadata = DocumentMetadata(
             source=document['source'],
             content_type=document['content_type'],
-            text=document['text'][:1500],  
+            text=document['text'],
             document_id=f"doc_{int_id}",
-            text_length=len(document['text']),
-            truncated=len(document['text']) > 4000,
+            text_length=document.get('original_length', len(document['text'])),
+            truncated=False,
             record_type=document['record_type'],
             chunk_number=document['chunk_number'],
             total_chunks=document['total_chunks'],
