@@ -4,9 +4,9 @@ from typing import List, Dict
 class TextChunker:
     def __init__(
         self,
-        chunk_size: int = 1000,
-        overlap: int = 200,
-        min_chunk_size: int = 100,
+        chunk_size: int = 800,
+        overlap: int = 160,
+        min_chunk_size: int = 200,
         sentence_aware: bool = True,
         paragraph_aware: bool = True
     ):

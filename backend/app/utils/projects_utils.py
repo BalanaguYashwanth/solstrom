@@ -7,7 +7,7 @@ from typing import List, Optional, Dict, Any
 
 from app.services.embeddings_service import EmbeddingService
 from app.models.api.rag_pipeline import DocumentEmbedding, DocumentMetadata
-from app.utils.text_chunker import TextChunker
+from app.utils.hybrid_chunker import hybrid_chunk_text
 
 async def process_batch(batch: List[Dict], stats: Dict, embedding_queue: asyncio.Queue):
         """Process a batch of documents and add to queue"""
@@ -30,6 +30,15 @@ async def embedding_consumer(
         try:
             doc = await asyncio.wait_for(embedding_queue.get(), timeout=1.0)
             embedding = await generate_embeddings_batch([doc], custom_metadata, executor)
+            if embedding is None:
+                stats['failed_embeddings'] += 1
+                print("Embedding failed: None returned")
+                continue
+            print("Embedding size:", len(embedding.values))
+            print("Embedding vector sample:", embedding.values[:5])
+            print("Text snippet:", embedding.metadata.text[:80])
+            print("Document ID:", embedding.metadata.document_id)
+
 
             if embedding:
                 stats['embeddings_generated'] += 1
@@ -50,33 +59,12 @@ async def embedding_consumer(
 
 async def process_text_file(text: str, filename: str) -> List[Dict]:
     """Process text file into chunks with overlapping context"""
-    
-    chunker = TextChunker(
-        chunk_size=1000,  
-        overlap=200,
-        min_chunk_size=200,
-        sentence_aware=True,
-        paragraph_aware=True      
-    )
-    chunks = chunker.create_chunks(text)
-    
-    result = []
-    for chunk in chunks:
-        result.append({
-            "source": filename,
-            "content_type": "text/plain",
-            "text": chunk['text'],
-            "original_length": len(chunk['text']), 
-            "chunk_number": chunk['index'],
-            "total_chunks": len(chunks),
-            "start_pos": chunk['start_pos'],
-            "end_pos": chunk['end_pos'],
-            "is_sentence_boundary": chunk.get('is_sentence_boundary', False),
-            "is_paragraph_boundary": chunk.get('is_paragraph_boundary', False),
-            "record_type": "text_chunk"
-        })
+    chunks = hybrid_chunk_text(text, filename)
+    print(f"Chunk count: {len(chunks)}")
+    for c in chunks:
+        print(c["json_key"], "->", c["text"][:100])
 
-    return result
+    return chunks
 
 async def generate_embeddings_batch(
     batch: List[Dict], 
