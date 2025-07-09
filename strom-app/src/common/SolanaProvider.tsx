@@ -16,7 +16,7 @@ interface SolanaProviderProps {
 }
 
 export const SolanaProvider: FC<SolanaProviderProps> = ({ children }) => {
-  const SOLANA_RPC_NETWORK = WalletAdapterNetwork.Mainnet;
+  const SOLANA_RPC_NETWORK = WalletAdapterNetwork.Devnet;
   const endpoint = useMemo(() => clusterApiUrl(SOLANA_RPC_NETWORK), [SOLANA_RPC_NETWORK]);
   const wallets = useMemo(() => [], []);
 
