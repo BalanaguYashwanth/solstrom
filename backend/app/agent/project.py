@@ -6,7 +6,7 @@ from qdrant_client.http import models
 from app.services.embeddings_service import EmbeddingService
 from app.external_services.claude_ai_client import ClaudeAIClient
 from app.models.api.agent_router import ProjectResponse
-from app.utils.projects_utils import format_context_texts, extract_source_info
+from app.utils.projects_utils import format_context_texts, extract_source_info, sort_priority, truncate_contexts, find_urls_in_metadata
 
 class ProjectAgent:
     """Handles project validation and queries using embeddings and vector DB matching"""
@@ -22,7 +22,8 @@ class ProjectAgent:
             query_response = await EmbeddingService.get_embeddings(
                 vector=user_message_embeddings,
                 limit=self.prompt_config['rag_settings'].get('search_depth', 5),
-                threshold=self.prompt_config['rag_settings'].get('relevance_threshold', 0.6)
+                # threshold=self.prompt_config['rag_settings'].get('relevance_threshold', 0.6)
+                threshold=None
             )
 
             expanded_contexts = []
@@ -32,44 +33,93 @@ class ProjectAgent:
                 seen_docs = set()
 
                 for item in query_response:
-                    if 'metadata' not in item:
-                        continue
-                    
-                    doc_id = item['metadata'].get('document_id')
+                    metadata = item.get('metadata', {})
+                    doc_id = metadata.get('document_id')
                     if not doc_id or doc_id in seen_docs:
                         continue
                     
-                seen_docs.add(doc_id)
+                    seen_docs.add(doc_id)
 
-                doc_chunks = await EmbeddingService.get_embeddings(
-                    vector=user_message_embeddings,
-                    limit=20, 
-                    threshold=0.5, 
-                    filter_condition=models.Filter(
-                        must=[
-                            models.FieldCondition(
-                                key="metadata.document_id",
-                                match=models.MatchValue(value=doc_id)
-                            )
-                        ]
+                    filter_conditions = [
+                        models.FieldCondition(
+                            key="document_id",
+                            match=models.MatchValue(value=doc_id)
+                        )
+                    ]
+
+                    # parent_id = item['metadata'].get('parent_id')
+                    # if parent_id and parent_id != doc_id:
+                    #     filter_conditions.append(
+                    #         models.FieldCondition(
+                    #             key="parent_id",
+                    #             match=models.MatchValue(value=parent_id)
+                    #         )
+                    #     )
+
+                    doc_chunks = await EmbeddingService.get_embeddings(
+                        vector=user_message_embeddings,
+                        limit=20, 
+                        threshold=0.6, 
+                        filter_condition=models.Filter(should=filter_conditions)    
                     )
-                )
 
-                for chunk in doc_chunks:
-                    if 'metadata' not in chunk:
+                    # Sort by priority
+                    doc_chunks.sort(key=sort_priority, reverse=True)
+
+                    # Deduplicate by json_key or path
+                    seen_paths = set()
+                    unique_chunks = []
+                    for chunk in doc_chunks:
+                        meta = chunk.get("metadata", {})
+                        path = meta.get("json_key") or meta.get("path")
+                        if not path or path in seen_paths:
+                            continue
+                        seen_paths.add(path)
+                        unique_chunks.append(chunk)
+
+                    doc_chunks = unique_chunks[:15]
+
+                    for chunk in doc_chunks:
+                        if 'metadata' not in chunk:
+                            continue
+                            
+                        chunk = extract_source_info(chunk)
+                        text = chunk['metadata'].get('text', '')
+                        if text:
+                            expanded_contexts.append(text)
+                            
+                            for key, value in chunk['metadata'].items():
+                                if isinstance(value, str) and value.startswith("http"):
+                                    source = {
+                                        "source_name": key,
+                                        "source_url": value
+                                    }
+                                    available_sources.add(json.dumps(source, sort_keys=True))
+                    
+                    if not doc_chunks:
+                        text = metadata.get('text', '')
+                        if text:
+                            expanded_contexts.append(text)
+
+                        extracted_urls = find_urls_in_metadata(metadata)
+
+                        for url in extracted_urls:
+                            source_name = "Detected Source" 
+                            try:
+                                source_name = url.split('/')[2]
+                            except IndexError:
+                                pass
+                                
+                            source = {
+                                "source_name": source_name,
+                                "source_url": url
+                            }
+                            available_sources.add(json.dumps(source, sort_keys=True))
+
                         continue
-                        
-                    chunk = extract_source_info(chunk)
-                    text = chunk['metadata'].get('text', '')
-                    if text:
-                        expanded_contexts.append(text)
-                        
-                    if all(k in chunk['metadata'] for k in ['source_name', 'source_url']):
-                        source = {
-                            'source_name': chunk['metadata']['source_name'],
-                            'source_url': chunk['metadata']['source_url']
-                        }
-                        available_sources.add(json.dumps(source, sort_keys=True))
+
+            expanded_contexts = list(dict.fromkeys(expanded_contexts))
+            expanded_contexts = truncate_contexts(expanded_contexts, max_chars=10000)
 
             if not expanded_contexts:
                 expanded_contexts = format_context_texts(query_response)
@@ -93,14 +143,28 @@ class ProjectAgent:
                 )
             except Exception as e:
                 print(f"Failed to validate response: {str(e)}")
-                result = ProjectResponse(
-                    response=["• I couldn't process the response properly"],
-                    is_greeting=False,
-                    exists_in_data=False,
-                    exists_elsewhere=False,
-                    relevant_projects=[],
-                    sources=[]
-                )    
+                error_message = str(e).lower()
+                if "rate limit" in error_message or "429" in error_message:
+                    result = ProjectResponse(
+                        response=[
+                            "• I'm currently experiencing high traffic and couldn't process your request.",
+                            "• Please try again after a short while."
+                        ],
+                        is_greeting=False,
+                        exists_in_data=False,
+                        exists_elsewhere=False,
+                        relevant_projects=[],
+                        sources=[]
+                    )
+                else:
+                    result = ProjectResponse(
+                        response=["• I couldn't process the response properly"],
+                        is_greeting=False,
+                        exists_in_data=False,
+                        exists_elsewhere=False,
+                        relevant_projects=[],
+                        sources=[]
+                    )
 
             return {
                 "response": result.response,

@@ -1,5 +1,6 @@
 import hashlib
 import re
+import json
 import asyncio
 import functools
 from concurrent.futures import ThreadPoolExecutor
@@ -7,7 +8,7 @@ from typing import List, Optional, Dict, Any
 
 from app.services.embeddings_service import EmbeddingService
 from app.models.api.rag_pipeline import DocumentEmbedding, DocumentMetadata
-from app.utils.text_chunker import TextChunker
+from app.utils.hybrid_chunker import hybrid_chunk_text
 
 async def process_batch(batch: List[Dict], stats: Dict, embedding_queue: asyncio.Queue):
         """Process a batch of documents and add to queue"""
@@ -30,6 +31,10 @@ async def embedding_consumer(
         try:
             doc = await asyncio.wait_for(embedding_queue.get(), timeout=1.0)
             embedding = await generate_embeddings_batch([doc], custom_metadata, executor)
+            if embedding is None:
+                stats['failed_embeddings'] += 1
+                print("Embedding failed: None returned")
+                continue
 
             if embedding:
                 stats['embeddings_generated'] += 1
@@ -50,33 +55,12 @@ async def embedding_consumer(
 
 async def process_text_file(text: str, filename: str) -> List[Dict]:
     """Process text file into chunks with overlapping context"""
-    
-    chunker = TextChunker(
-        chunk_size=1000,  
-        overlap=200,
-        min_chunk_size=200,
-        sentence_aware=True,
-        paragraph_aware=True      
-    )
-    chunks = chunker.create_chunks(text)
-    
-    result = []
-    for chunk in chunks:
-        result.append({
-            "source": filename,
-            "content_type": "text/plain",
-            "text": chunk['text'],
-            "original_length": len(chunk['text']), 
-            "chunk_number": chunk['index'],
-            "total_chunks": len(chunks),
-            "start_pos": chunk['start_pos'],
-            "end_pos": chunk['end_pos'],
-            "is_sentence_boundary": chunk.get('is_sentence_boundary', False),
-            "is_paragraph_boundary": chunk.get('is_paragraph_boundary', False),
-            "record_type": "text_chunk"
-        })
+    chunks = hybrid_chunk_text(text, filename)
+    print(f"Chunk count: {len(chunks)}")
+    for c in chunks:
+        print(c["json_key"], "->", c["text"][:100])
 
-    return result
+    return chunks
 
 async def generate_embeddings_batch(
     batch: List[Dict], 
@@ -107,7 +91,7 @@ def create_document_embedding(
         content_hash = hashlib.sha256(text_to_hash.encode()).hexdigest()
         int_id = int(content_hash[:15], 16) 
 
-        embedding_text = document['text'] 
+        embedding_text = f"{document.get('json_key', '')}\n{document['text']}"
         embedding_values = EmbeddingService.create_embeddings(embedding_text)
         
         metadata = DocumentMetadata(
@@ -174,3 +158,59 @@ def extract_source_info(document: Dict[str, Any]) -> Dict[str, Any]:
 
     document["metadata"] = metadata
     return document
+
+def sort_priority(chunk):
+    meta = chunk.get('metadata', {})
+    priority_map = {
+        "json_subtree": 3,
+        "json_long_text_field": 2,
+        "json_field": 1,
+        "text_chunk": 1,
+        "json_object": 0
+    }
+    return priority_map.get(meta.get("record_type"), 0), -meta.get("depth", 0)
+
+def truncate_contexts(contexts, max_chars=10000):
+    truncated = []
+    total_chars = 0
+    for ctx in contexts:
+        if total_chars + len(ctx) > max_chars:
+            break
+        truncated.append(ctx)
+        total_chars += len(ctx)
+    return truncated
+
+def find_urls_in_metadata(data: Any) -> set:
+    """
+    Recursively finds all strings that look like URLs within a nested data structure.
+    """
+    found_urls = set()
+    
+    # If the data is a dictionary, iterate through its values
+    if isinstance(data, dict):
+        for value in data.values():
+            found_urls.update(find_urls_in_metadata(value))
+            
+    # If the data is a list, iterate through its items
+    elif isinstance(data, list):
+        for item in data:
+            found_urls.update(find_urls_in_metadata(item))
+            
+    # If the data is a string, check if it's a URL or contains URLs
+    elif isinstance(data, str):
+        # First, check if the string itself is a JSON object. If so, parse and recurse.
+        if data.strip().startswith('{') and data.strip().endswith('}'):
+            try:
+                # This handles the case where metadata['text'] is a JSON string
+                parsed_json = json.loads(data)
+                found_urls.update(find_urls_in_metadata(parsed_json))
+            except json.JSONDecodeError:
+                pass
+        
+        # Use regex to find all http/https URLs within the string
+        # This will find URLs even if they are embedded in text.
+        regex_urls = re.findall(r'https?://[^\s\'"]+', data)
+        for url in regex_urls:
+            found_urls.add(url)
+            
+    return found_urls
