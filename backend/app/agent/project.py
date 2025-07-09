@@ -6,7 +6,7 @@ from qdrant_client.http import models
 from app.services.embeddings_service import EmbeddingService
 from app.external_services.claude_ai_client import ClaudeAIClient
 from app.models.api.agent_router import ProjectResponse
-from app.utils.projects_utils import format_context_texts, extract_source_info
+from app.utils.projects_utils import format_context_texts, extract_source_info, sort_priority, truncate_contexts, find_urls_in_metadata
 
 class ProjectAgent:
     """Handles project validation and queries using embeddings and vector DB matching"""
@@ -18,7 +18,6 @@ class ProjectAgent:
     async def process(self, user_message: str) -> Dict[str, Any]:
         try:
             user_message_embeddings = EmbeddingService.create_embeddings(user_message)
-            print("Query vector:", user_message_embeddings[:5]) 
     
             query_response = await EmbeddingService.get_embeddings(
                 vector=user_message_embeddings,
@@ -26,9 +25,6 @@ class ProjectAgent:
                 # threshold=self.prompt_config['rag_settings'].get('relevance_threshold', 0.6)
                 threshold=None
             )
-            print("===== Raw Query Response Metadata Preview =====")
-            for item in query_response:
-                print(json.dumps(item.get('metadata', {}), indent=2))
 
             expanded_contexts = []
             available_sources = set()
@@ -37,10 +33,8 @@ class ProjectAgent:
                 seen_docs = set()
 
                 for item in query_response:
-                    if 'metadata' not in item:
-                        continue
-                    
-                    doc_id = item['metadata'].get('document_id')
+                    metadata = item.get('metadata', {})
+                    doc_id = metadata.get('document_id')
                     if not doc_id or doc_id in seen_docs:
                         continue
                     
@@ -53,29 +47,38 @@ class ProjectAgent:
                         )
                     ]
 
-                    parent_id = item['metadata'].get('parent_id')
-                    if parent_id:
-                        filter_conditions.append(
-                            models.FieldCondition(
-                                key="parent_id",
-                                match=models.MatchValue(value=parent_id)
-                            )
-                        )
+                    # parent_id = item['metadata'].get('parent_id')
+                    # if parent_id and parent_id != doc_id:
+                    #     filter_conditions.append(
+                    #         models.FieldCondition(
+                    #             key="parent_id",
+                    #             match=models.MatchValue(value=parent_id)
+                    #         )
+                    #     )
 
                     doc_chunks = await EmbeddingService.get_embeddings(
                         vector=user_message_embeddings,
                         limit=20, 
                         threshold=0.6, 
-                        filter_condition=models.Filter(must=filter_conditions)    
+                        filter_condition=models.Filter(should=filter_conditions)    
                     )
-                    print(f"Doc Chuks: {doc_chunks}")
-                    for idx, chunk in enumerate(doc_chunks):
-                        print(f"[Chunk #{idx}] Text Preview: {chunk['metadata'].get('text', '')[:100]}...")  # Log first 100 chars
 
-                    print(f"[Expanded Context Count]: {len(expanded_contexts)}")
-                    print(f"[Query matched documents]: {seen_docs}")
+                    # Sort by priority
+                    doc_chunks.sort(key=sort_priority, reverse=True)
 
-                    doc_chunks.sort(key=lambda x: x['metadata'].get('record_type') == 'json_field_chunk', reverse=True)
+                    # Deduplicate by json_key or path
+                    seen_paths = set()
+                    unique_chunks = []
+                    for chunk in doc_chunks:
+                        meta = chunk.get("metadata", {})
+                        path = meta.get("json_key") or meta.get("path")
+                        if not path or path in seen_paths:
+                            continue
+                        seen_paths.add(path)
+                        unique_chunks.append(chunk)
+
+                    doc_chunks = unique_chunks[:15]
+
                     for chunk in doc_chunks:
                         if 'metadata' not in chunk:
                             continue
@@ -85,64 +88,89 @@ class ProjectAgent:
                         if text:
                             expanded_contexts.append(text)
                             
-                        if all(k in chunk['metadata'] for k in ['source_name', 'source_url']):
+                            for key, value in chunk['metadata'].items():
+                                if isinstance(value, str) and value.startswith("http"):
+                                    source = {
+                                        "source_name": key,
+                                        "source_url": value
+                                    }
+                                    available_sources.add(json.dumps(source, sort_keys=True))
+                    
+                    if not doc_chunks:
+                        text = metadata.get('text', '')
+                        if text:
+                            expanded_contexts.append(text)
+
+                        extracted_urls = find_urls_in_metadata(metadata)
+
+                        for url in extracted_urls:
+                            source_name = "Detected Source" 
+                            try:
+                                source_name = url.split('/')[2]
+                            except IndexError:
+                                pass
+                                
                             source = {
-                                'source_name': chunk['metadata']['source_name'],
-                                'source_url': chunk['metadata']['source_url']
+                                "source_name": source_name,
+                                "source_url": url
                             }
                             available_sources.add(json.dumps(source, sort_keys=True))
 
+                        continue
+
             expanded_contexts = list(dict.fromkeys(expanded_contexts))
+            expanded_contexts = truncate_contexts(expanded_contexts, max_chars=10000)
 
             if not expanded_contexts:
                 expanded_contexts = format_context_texts(query_response)
-            print(f"Expanded Context: {expanded_contexts}")
 
             available_sources = [json.loads(s) for s in available_sources]
-            print(f"Available Sources: {available_sources}")
             
             formatted_user_message = self.prompt_config['user_message_template'].format(
                 user_message=user_message,
                 context="\n".join(expanded_contexts),
                 available_sources=json.dumps(available_sources)
             )
-            print(f"Formatted User Message: {formatted_user_message}")
-
-            # TODO - Returning the mock response for testing 
-            print("Returning mocked response for testing context retrieval...")
-            return {
-                "response": ["[MOCKED] Context retrieval completed."],
-                "relevant_projects": [],
-                "sources": available_sources,
-                "retrieved_chunks": expanded_contexts 
-            }
             
-            # try:
-            #     result: ProjectResponse = await ClaudeAIClient.generate(
-            #         model_class=ProjectResponse,
-            #         user_message=formatted_user_message,
-            #         system_message=self.prompt_config['base_system_message'],
-            #         temperature=self.prompt_config['parameters'].get('temperature', 0.7),
-            #         max_tokens=self.prompt_config['parameters'].get('max_tokens', 1500),
-            #         top_p=self.prompt_config['parameters'].get('top_p', 0.95)
-            #     )
-            #     print(f"Claude Response: {result}")
-            # except Exception as e:
-            #     print(f"Failed to validate response: {str(e)}")
-            #     result = ProjectResponse(
-            #         response=["• I couldn't process the response properly"],
-            #         is_greeting=False,
-            #         exists_in_data=False,
-            #         exists_elsewhere=False,
-            #         relevant_projects=[],
-            #         sources=[]
-            #     )    
+            try:
+                result: ProjectResponse = await ClaudeAIClient.generate(
+                    model_class=ProjectResponse,
+                    user_message=formatted_user_message,
+                    system_message=self.prompt_config['base_system_message'],
+                    temperature=self.prompt_config['parameters'].get('temperature', 0.7),
+                    max_tokens=self.prompt_config['parameters'].get('max_tokens', 1500),
+                    top_p=self.prompt_config['parameters'].get('top_p', 0.95)
+                )
+            except Exception as e:
+                print(f"Failed to validate response: {str(e)}")
+                error_message = str(e).lower()
+                if "rate limit" in error_message or "429" in error_message:
+                    result = ProjectResponse(
+                        response=[
+                            "• I'm currently experiencing high traffic and couldn't process your request.",
+                            "• Please try again after a short while."
+                        ],
+                        is_greeting=False,
+                        exists_in_data=False,
+                        exists_elsewhere=False,
+                        relevant_projects=[],
+                        sources=[]
+                    )
+                else:
+                    result = ProjectResponse(
+                        response=["• I couldn't process the response properly"],
+                        is_greeting=False,
+                        exists_in_data=False,
+                        exists_elsewhere=False,
+                        relevant_projects=[],
+                        sources=[]
+                    )
 
-            # return {
-            #     "response": result.response,
-            #     "relevant_projects": result.relevant_projects,
-            #     "sources": result.sources
-            # }
+            return {
+                "response": result.response,
+                "relevant_projects": result.relevant_projects,
+                "sources": result.sources
+            }
 
         except Exception as e:
             print(f"Processing error: {str(e)}")

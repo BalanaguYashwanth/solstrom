@@ -29,7 +29,6 @@ def hybrid_chunk_text(text: str, filename: str) -> List[Dict[str, Any]]:
     try:
         data = json.loads(text)
         if isinstance(data, list):
-            print(f"[CHUNKER] Using case: JSON array from file: {filename}")
             for i, item in enumerate(data):
                 if isinstance(item, dict):
                     chunks.extend(_chunk_json_object(item, filename, chunker, index_prefix=i))
@@ -37,7 +36,6 @@ def hybrid_chunk_text(text: str, filename: str) -> List[Dict[str, Any]]:
                     chunks.append(_make_json_chunk(item, filename, i, len(data)))
             return chunks
         elif isinstance(data, dict):
-            print(f"[CHUNKER] Using case: Single JSON object from file: {filename}")
             return _chunk_json_object(data, filename, chunker)
     except json.JSONDecodeError:
         pass
@@ -45,7 +43,6 @@ def hybrid_chunk_text(text: str, filename: str) -> List[Dict[str, Any]]:
     # Case 2: JSONL (Line-delimited JSON)
     jsonl_lines = text.strip().splitlines()
     if all(_is_valid_json_line(line) for line in jsonl_lines):
-        print(f"[CHUNKER] Using case: JSONL (line-delimited JSON) from file: {filename}")
         for i, line in enumerate(jsonl_lines):
             obj = json.loads(line)
             if isinstance(obj, dict):
@@ -86,11 +83,9 @@ def hybrid_chunk_text(text: str, filename: str) -> List[Dict[str, Any]]:
         if last_end < len(text):
             trailing_text = text[last_end:]
             embedded_jsons.extend(_chunk_plain_text(trailing_text, filename, chunker))
-        print(f"[CHUNKER] Using case: Embedded JSON objects in text from file: {filename}")
         return embedded_jsons
 
     # Case 4: Fully semantic fallback
-    print(f"[CHUNKER] Using case: Plain text fallback for file: {filename}")
     return _chunk_plain_text(text, filename, chunker)
 
 def _chunk_json_object(obj: Dict[str, Any], filename: str, chunker: TextChunker, index_prefix: int = 0, parent_key: str = "") -> List[Dict[str, Any]]:
@@ -98,68 +93,112 @@ def _chunk_json_object(obj: Dict[str, Any], filename: str, chunker: TextChunker,
     chunk_index = 0
     document_id = obj.get("id") or obj.get("doc_id") or f"{filename}_{index_prefix}"
 
-    for key, value in obj.items():
-        full_key = f"{parent_key}.{key}" if parent_key else key
+    def traverse(item, path):
+        nonlocal chunk_index
+        if isinstance(item, dict):
+            parent = _get_parent_snippet(obj, path)
+            siblings = _get_sibling_context(obj, path)
 
-        if isinstance(value, str) and len(value) > chunker.chunk_size:
-            # semantic chunking for long strings
-            sub_chunks = chunker.create_chunks(value)
-            for sub in sub_chunks:
+            context_enriched_text = {
+                "path": path,
+                "value": item,
+                "parent_context": parent,
+                "siblings": siblings
+            }
+
+            raw = json.dumps(context_enriched_text, ensure_ascii=False, indent=2)
+
+            should_preserve = (
+                len(item) >= 2 and any(
+                    isinstance(v, str) and len(v) > 50 or isinstance(v, (dict, list))
+                    for v in item.values()
+                )
+            )
+
+            if should_preserve and len(raw) <= chunker.chunk_size * 2:
                 chunks.append({
                     "source": filename,
                     "content_type": "application/json",
-                    "text": sub['text'],
-                    "original_length": len(sub['text']),
-                    "json_key": full_key,
+                    "text": raw,
+                    "original_length": len(raw),
+                    "json_key": path,
                     "chunk_number": chunk_index,
                     "document_id": document_id,
-                    "record_type": "json_field_chunk"
+                    "record_type": "json_subtree",
+                    "metadata": {
+                        "path": path,
+                        "parent_path": ".".join(path.split(".")[:-1]),
+                        "depth": path.count("."),
+                        "is_leaf": False
+                    }
                 })
                 chunk_index += 1
+                return
 
-        elif isinstance(value, dict):
-            # recursively chunk nested dict
-            sub_chunks = _chunk_json_object(value, filename, chunker, index_prefix, full_key)
-            chunks.extend(sub_chunks)
-            chunk_index += len(sub_chunks)
+            for k, v in item.items():
+                new_path = f"{path}.{k}" if path else k
+                traverse(v, new_path)
 
-        elif isinstance(value, list):
-            for i, item in enumerate(value):
-                if isinstance(item, dict):
-                    sub_chunks = _chunk_json_object(item, filename, chunker, index_prefix, f"{full_key}[{i}]")
-                    chunks.extend(sub_chunks)
-                    chunk_index += len(sub_chunks)
+        elif isinstance(item, list):
+            for i, v in enumerate(item):
+                new_path = f"{path}[{i}]"
+                traverse(v, new_path)
+
+        else:
+            if isinstance(item, str) and len(item.strip()) >= 10:
+                if len(item.strip()) > 300:
+                    chunks_from_string = chunker.create_chunks(item.strip())
+                    for chunk in chunks_from_string:
+                        chunks.append({
+                            "source": filename,
+                            "content_type": "text/plain",
+                            "text": chunk["text"],
+                            "original_length": len(chunk["text"]),
+                            "json_key": path,
+                            "chunk_number": chunk_index,
+                            "document_id": document_id,
+                            "record_type": "json_long_text_field",
+                            "start_pos": chunk['start_pos'],
+                            "end_pos": chunk['end_pos'],
+                            "metadata": {
+                                "path": path,
+                                "parent_path": ".".join(path.split(".")[:-1]),
+                                "depth": path.count("."),
+                                "is_leaf": True
+                            }
+                        })
+                        chunk_index += 1
                 else:
-                    chunk_text = json.dumps({full_key: item})
+                    raw = json.dumps({
+                        "path": path,
+                        "value": item,
+                        "parent_context": _get_parent_snippet(obj, path),
+                        "siblings": _get_sibling_context(obj, path)
+                    }, ensure_ascii=False)
                     chunks.append({
                         "source": filename,
                         "content_type": "application/json",
-                        "text": chunk_text,
-                        "original_length": len(chunk_text),
-                        "json_key": f"{full_key}[{i}]",
+                        "text": raw,
+                        "original_length": len(raw),
+                        "json_key": path,
                         "chunk_number": chunk_index,
                         "document_id": document_id,
-                        "record_type": "json_field"
+                        "record_type": "json_field",
+                        "metadata": {
+                            "path": path,
+                            "parent_path": ".".join(path.split(".")[:-1]),
+                            "depth": path.count("."),
+                            "is_leaf": True
+                        }
                     })
                     chunk_index += 1
-        else:
-            chunk_text = json.dumps({full_key: value})
-            chunks.append({
-                "source": filename,
-                "content_type": "application/json",
-                "text": chunk_text,
-                "original_length": len(chunk_text),
-                "json_key": full_key,
-                "chunk_number": chunk_index,
-                "document_id": document_id,
-                "record_type": "json_field"
-            })
-            chunk_index += 1
+
+    traverse(obj, parent_key)
 
     total = len(chunks)
     for c in chunks:
         c["total_chunks"] = total
-    
+
     return chunks
 
 def _make_json_chunk(item: Any, filename: str, index: int, total: int) -> Dict[str, Any]:
@@ -203,3 +242,34 @@ def _is_valid_json_line(line: str) -> bool:
         return True
     except json.JSONDecodeError:
         return False
+    
+def _get_parent_snippet(root: Dict[str, Any], path: str, max_depth: int = 2) -> Any:
+    """Extract a partial subtree for context using JSON path traversal"""
+    keys = re.split(r"\.|\[|\]", path)
+    keys = [k for k in keys if k]
+
+    try:
+        current = root
+        for depth, key in enumerate(keys[:len(keys) - max_depth]):
+            if key.isdigit():
+                current = current[int(key)]
+            else:
+                current = current.get(key, {})
+        return current
+    except Exception:
+        return None
+    
+def _get_sibling_context(root: Dict[str, Any], path: str) -> Dict[str, Any]:
+    keys = re.split(r"\.|\[|\]", path)
+    keys = [k for k in keys if k]
+
+    try:
+        current = root
+        for key in keys[:-1]:
+            current = current[int(key)] if key.isdigit() else current[key]
+
+        if isinstance(current, dict):
+            return {k: v for k, v in current.items() if k != keys[-1]}
+    except Exception:
+        pass
+    return {}

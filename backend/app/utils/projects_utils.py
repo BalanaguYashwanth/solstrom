@@ -1,5 +1,6 @@
 import hashlib
 import re
+import json
 import asyncio
 import functools
 from concurrent.futures import ThreadPoolExecutor
@@ -34,11 +35,6 @@ async def embedding_consumer(
                 stats['failed_embeddings'] += 1
                 print("Embedding failed: None returned")
                 continue
-            print("Embedding size:", len(embedding.values))
-            print("Embedding vector sample:", embedding.values[:5])
-            print("Text snippet:", embedding.metadata.text[:80])
-            print("Document ID:", embedding.metadata.document_id)
-
 
             if embedding:
                 stats['embeddings_generated'] += 1
@@ -95,7 +91,7 @@ def create_document_embedding(
         content_hash = hashlib.sha256(text_to_hash.encode()).hexdigest()
         int_id = int(content_hash[:15], 16) 
 
-        embedding_text = document['text'] 
+        embedding_text = f"{document.get('json_key', '')}\n{document['text']}"
         embedding_values = EmbeddingService.create_embeddings(embedding_text)
         
         metadata = DocumentMetadata(
@@ -162,3 +158,59 @@ def extract_source_info(document: Dict[str, Any]) -> Dict[str, Any]:
 
     document["metadata"] = metadata
     return document
+
+def sort_priority(chunk):
+    meta = chunk.get('metadata', {})
+    priority_map = {
+        "json_subtree": 3,
+        "json_long_text_field": 2,
+        "json_field": 1,
+        "text_chunk": 1,
+        "json_object": 0
+    }
+    return priority_map.get(meta.get("record_type"), 0), -meta.get("depth", 0)
+
+def truncate_contexts(contexts, max_chars=10000):
+    truncated = []
+    total_chars = 0
+    for ctx in contexts:
+        if total_chars + len(ctx) > max_chars:
+            break
+        truncated.append(ctx)
+        total_chars += len(ctx)
+    return truncated
+
+def find_urls_in_metadata(data: Any) -> set:
+    """
+    Recursively finds all strings that look like URLs within a nested data structure.
+    """
+    found_urls = set()
+    
+    # If the data is a dictionary, iterate through its values
+    if isinstance(data, dict):
+        for value in data.values():
+            found_urls.update(find_urls_in_metadata(value))
+            
+    # If the data is a list, iterate through its items
+    elif isinstance(data, list):
+        for item in data:
+            found_urls.update(find_urls_in_metadata(item))
+            
+    # If the data is a string, check if it's a URL or contains URLs
+    elif isinstance(data, str):
+        # First, check if the string itself is a JSON object. If so, parse and recurse.
+        if data.strip().startswith('{') and data.strip().endswith('}'):
+            try:
+                # This handles the case where metadata['text'] is a JSON string
+                parsed_json = json.loads(data)
+                found_urls.update(find_urls_in_metadata(parsed_json))
+            except json.JSONDecodeError:
+                pass
+        
+        # Use regex to find all http/https URLs within the string
+        # This will find URLs even if they are embedded in text.
+        regex_urls = re.findall(r'https?://[^\s\'"]+', data)
+        for url in regex_urls:
+            found_urls.add(url)
+            
+    return found_urls

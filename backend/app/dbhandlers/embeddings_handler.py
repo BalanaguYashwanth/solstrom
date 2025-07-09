@@ -150,11 +150,6 @@ class EmbeddingsHandler:
                     None,
                     lambda: self.client.search(**query_params)
                 )
-            
-            print(f"Qdrant returned {len(search_results)} results")
-            
-            for match in search_results:
-                print(f"Score: {match.score}, Metadata: {match.payload}")
 
             return [
                 {
