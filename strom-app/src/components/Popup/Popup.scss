@@ -12,6 +12,8 @@
   justify-content: center;
   z-index: 1000;
   backdrop-filter: blur(4px);
+  padding: 1rem;
+  box-sizing: border-box;
 }
 
 .popup-box {
@@ -69,5 +71,46 @@
 
   &:hover {
     opacity: 0.9;
+  }
+}
+
+.popup-message {
+  input[type="number"] {
+    padding: 0.5rem;
+    width: 120px;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    font-size: 1rem;
+    margin-right: 0.5rem;
+  }
+
+  button {
+    padding: 0.5rem 1rem;
+    background: linear-gradient(90deg, #7b2ff7, #f107a3);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-weight: 500;
+
+    &:hover {
+      opacity: 0.9;
+    }
+  }
+}
+
+@media (max-width: 480px) {
+  .popup-message {
+    font-size: 1rem;
+    
+    input[type="number"] {
+      width: 100px;
+      margin-right: 0.3rem;
+    }
+  }
+  
+  .popup-actions button {
+    padding: 0.6rem 1.2rem;
+    font-size: 0.95rem;
   }
 }

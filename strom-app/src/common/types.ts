@@ -21,6 +21,7 @@ export interface ProjectAgentResponse {
 
 export interface PopupProps {
   open: boolean;
+  heading?: string;
   message: string;
   onClose: () => void;
   actions?: React.ReactNode;

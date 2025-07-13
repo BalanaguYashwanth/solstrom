@@ -4,6 +4,7 @@ import './index.css';
 import App from './App';
 import reportWebVitals from './reportWebVitals';
 import { GoogleOAuthProvider } from '@react-oauth/google';
+import { SolanaProvider } from './common/SolanaProvider';
 
 const GOOGLE_CLIENT_ID = process.env.REACT_APP_CLIENT_ID || '';
 
@@ -12,9 +13,11 @@ const root = ReactDOM.createRoot(
 );
 root.render(
   <React.StrictMode>
+    <SolanaProvider>
     <GoogleOAuthProvider clientId={GOOGLE_CLIENT_ID}>
       <App />
     </GoogleOAuthProvider>
+    </SolanaProvider>
   </React.StrictMode>
 );
 
