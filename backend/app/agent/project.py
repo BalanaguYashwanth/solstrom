@@ -6,7 +6,13 @@ from qdrant_client.http import models
 from app.services.embeddings_service import EmbeddingService
 from app.external_services.claude_ai_client import ClaudeAIClient
 from app.models.api.agent_router import ProjectResponse
-from app.utils.projects_utils import format_context_texts, extract_source_info, sort_priority, truncate_contexts, find_urls_in_metadata
+from app.utils.projects_utils import (
+    format_context_texts, 
+    extract_source_info, 
+    sort_priority, 
+    truncate_contexts, 
+    find_urls_in_metadata
+)
 
 class ProjectAgent:
     """Handles project validation and queries using embeddings and vector DB matching"""
@@ -24,6 +30,7 @@ class ProjectAgent:
                 limit=self.prompt_config['rag_settings'].get('search_depth', 5),
                 threshold=None
             )
+            print(f"Query Response: {query_response}")
 
             expanded_contexts = []
             available_sources = set()
@@ -34,6 +41,7 @@ class ProjectAgent:
                 for item in query_response:
                     metadata = item.get('metadata', {})
                     doc_id = metadata.get('document_id')
+
                     if not doc_id or doc_id in seen_docs:
                         continue
                     
@@ -49,44 +57,54 @@ class ProjectAgent:
                     doc_chunks = await EmbeddingService.get_embeddings(
                         vector=user_message_embeddings,
                         limit=20, 
-                        threshold=0.6, 
+                        threshold=0.3, 
                         filter_condition=models.Filter(should=filter_conditions)    
                     )
+                    print(f"Doc Chunks: {doc_chunks}")
 
-                    # Sort by priority
-                    doc_chunks.sort(key=sort_priority, reverse=True)
+                    if doc_chunks:
+                        doc_chunks.sort(key=sort_priority, reverse=True)
+                        print(f"Sorted Doc Chunks: {doc_chunks}")
 
-                    # Deduplicate by json_key or path
-                    seen_paths = set()
-                    unique_chunks = []
-                    for chunk in doc_chunks:
-                        meta = chunk.get("metadata", {})
-                        path = meta.get("json_key") or meta.get("path")
-                        if not path or path in seen_paths:
-                            continue
-                        seen_paths.add(path)
-                        unique_chunks.append(chunk)
+                        seen_paths = set()
+                        unique_chunks = []
+                        for chunk in doc_chunks:
+                            meta = chunk.get("metadata", {})
+                            path = meta.get("json_key") or meta.get("path") or f"{meta.get('document_id', '')}_{chunk.get('id', '')}"
+                            if path and path not in seen_paths:
+                                seen_paths.add(path)
+                                unique_chunks.append(chunk)
 
-                    doc_chunks = unique_chunks[:15]
+                        final_chunks = unique_chunks[:15]
+                        print(f"Unique Doc Chunks: {final_chunks}")
 
-                    for chunk in doc_chunks:
-                        if 'metadata' not in chunk:
-                            continue
-                            
-                        chunk = extract_source_info(chunk)
-                        text = chunk['metadata'].get('text', '')
-                        if text:
-                            expanded_contexts.append(text)
-                            
-                            for key, value in chunk['metadata'].items():
-                                if isinstance(value, str) and value.startswith("http"):
+                        for chunk in final_chunks:
+                            if 'metadata' not in chunk:
+                                continue
+
+                            chunk = extract_source_info(chunk)
+                            text = chunk['metadata'].get('text', '')
+                            if text:
+                                expanded_contexts.append(text)
+
+                                found_urls = find_urls_in_metadata(chunk.get('metadata', {}))
+
+                                for url in found_urls:
+                                    source_name = "Detected Source"
+
+                                    try:
+                                        source_name = url.split('/')[2]
+                                    except IndexError:
+                                        pass
+
                                     source = {
-                                        "source_name": key,
-                                        "source_url": value
+                                        "source_name": source_name, 
+                                        "source_url": url
                                     }
                                     available_sources.add(json.dumps(source, sort_keys=True))
                     
-                    if not doc_chunks:
+                    else:
+                        print(f"No Doc Chunks available, falling back to Query Response")
                         text = metadata.get('text', '')
                         if text:
                             expanded_contexts.append(text)
@@ -106,8 +124,6 @@ class ProjectAgent:
                             }
                             available_sources.add(json.dumps(source, sort_keys=True))
 
-                        continue
-
             expanded_contexts = list(dict.fromkeys(expanded_contexts))
             expanded_contexts = truncate_contexts(expanded_contexts, max_chars=10000)
 
@@ -115,6 +131,9 @@ class ProjectAgent:
                 expanded_contexts = format_context_texts(query_response)
 
             available_sources = [json.loads(s) for s in available_sources]
+            
+            print(f"Final expanded_contexts count: {len(expanded_contexts)}")
+            print(f"Available sources count: {len(available_sources)}")
             
             formatted_user_message = self.prompt_config['user_message_template'].format(
                 user_message=user_message,
@@ -131,6 +150,7 @@ class ProjectAgent:
                     max_tokens=self.prompt_config['parameters'].get('max_tokens', 1500),
                     top_p=self.prompt_config['parameters'].get('top_p', 0.95)
                 )
+                print(f"Final Result: {result}")
             except Exception as e:
                 print(f"Failed to validate response: {str(e)}")
                 error_message = str(e).lower()
