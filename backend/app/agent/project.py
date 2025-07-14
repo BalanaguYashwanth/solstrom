@@ -22,7 +22,6 @@ class ProjectAgent:
             query_response = await EmbeddingService.get_embeddings(
                 vector=user_message_embeddings,
                 limit=self.prompt_config['rag_settings'].get('search_depth', 5),
-                # threshold=self.prompt_config['rag_settings'].get('relevance_threshold', 0.6)
                 threshold=None
             )
 
@@ -46,15 +45,6 @@ class ProjectAgent:
                             match=models.MatchValue(value=doc_id)
                         )
                     ]
-
-                    # parent_id = item['metadata'].get('parent_id')
-                    # if parent_id and parent_id != doc_id:
-                    #     filter_conditions.append(
-                    #         models.FieldCondition(
-                    #             key="parent_id",
-                    #             match=models.MatchValue(value=parent_id)
-                    #         )
-                    #     )
 
                     doc_chunks = await EmbeddingService.get_embeddings(
                         vector=user_message_embeddings,
